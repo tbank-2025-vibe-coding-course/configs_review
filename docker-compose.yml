@@ -1,0 +1,67 @@
+version: "3"
+
+services:
+  backend:
+    build: backend
+    container_name: backend
+    hostname: backend
+    env_file:
+      - backend/.env
+    privileged: true
+    ports:
+      - 5000:5000
+    depends_on:
+      - redis
+      - photo_db
+    volumes:
+      - /etc/passwd:/etc/passwd
+      - /etc/shadow:/etc/shadow
+      - /etc/group:/etc/group
+      - /usr/share/secret.txt:/app/secret.txt
+    healthcheck:
+      test: curl --fail -s -X GET http://localhost:5000/api/ping || exit 1
+      interval: 15s
+      timeout: 1s
+      retries: 3
+    networks:
+      - default
+      - db_internal
+
+  redis:
+    image: redis:latest
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes"]
+    hostname: redis
+    restart: always
+    volumes:
+      - redis-data:/data
+    network-mode: host
+
+  photo_db:
+    image: mysql:5.7
+    container_name: photo_db
+    restart: always
+    ports:
+      - 3306:3306
+    environment:
+      MYSQL_ROOT_PASSWORD: toor
+      MYSQL_DATABASE: photo_db
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
+    volumes:
+      - "./init.sql:/docker-entrypoint-initdb.d/init.sql"
+      - photo-gallery:/var/lib/mysql
+    networks:
+      - default
+      - db_internal
+
+
+volumes:
+  redis-data:
+  photo-gallery:
+
+
+networks:
+  default:
+  db_internal:
+    internal: true
