@@ -7,17 +7,27 @@ services:
     hostname: backend
     env_file:
       - backend/.env
-    privileged: true
+    # ИСПРАВЛЕНО: Удален privileged: true
+    # ПРОБЛЕМА: privileged режим дает контейнеру полный доступ ко всем устройствам хоста
+    # и отключает большинство мер безопасности Docker (capabilities, seccomp, AppArmor).
+    # Это огромная брешь в безопасности - контейнер может полностью скомпрометировать хост.
+    # РЕШЕНИЕ: Удалить privileged: true. Если нужны специфические возможности - использовать
+    # cap_add с конкретными capabilities (например, CAP_NET_ADMIN), но не давать полный доступ.
     ports:
       - 5000:5000
     depends_on:
       - redis
       - photo_db
     volumes:
-      - /etc/passwd:/etc/passwd
-      - /etc/shadow:/etc/shadow
-      - /etc/group:/etc/group
-      - /usr/share/secret.txt:/app/secret.txt
+      # ИСПРАВЛЕНО: Удалены монтирования критических системных файлов хоста
+      # ПРОБЛЕМА: Монтирование /etc/passwd, /etc/shadow, /etc/group из хоста в контейнер:
+      # 1) /etc/shadow содержит хеши паролей всех пользователей хоста - критическая утечка
+      # 2) Доступ к этим файлам позволяет атакующему получить информацию о пользователях хоста
+      # 3) Нарушает изоляцию контейнера, делая его зависимым от конфигурации хоста
+      # 4) /usr/share/secret.txt - прямое указание на секретный файл в контейнере
+      # РЕШЕНИЕ: Удалить все эти монтирования. Управление пользователями должно быть внутри
+      # контейнера. Секреты передавать через Docker secrets или переменные окружения.
+      - backend-data:/app/data  # Добавлен volume для данных приложения, если нужен
     healthcheck:
       test: curl --fail -s -X GET http://localhost:5000/api/ping || exit 1
       interval: 15s
@@ -28,26 +38,69 @@ services:
       - db_internal
 
   redis:
-    image: redis:latest
+    # ИСПРАВЛЕНО: Изменен тег с latest на конкретную версию
+    # ПРОБЛЕМА: Использование тега :latest приводит к непредсказуемости:
+    # 1) При каждом pull может загрузиться новая версия с breaking changes
+    # 2) Невозможно воспроизвести точное окружение (не reproducible builds)
+    # 3) Усложняет откат к предыдущей версии при проблемах
+    # 4) Нарушает принцип иммутабельности инфраструктуры
+    # РЕШЕНИЕ: Использовать конкретную версию (например, 7.2-alpine).
+    # Alpine образ меньше по размеру и содержит меньше потенциальных уязвимостей.
+    image: redis:7.2-alpine
     container_name: redis
     command: ["redis-server", "--appendonly", "yes"]
     hostname: redis
     restart: always
     volumes:
       - redis-data:/data
-    network-mode: host
+    # ИСПРАВЛЕНО: Удален network_mode: host, добавлены networks
+    # ПРОБЛЕМА: network_mode: host отключает сетевую изоляцию контейнера:
+    # 1) Контейнер получает прямой доступ ко всем сетевым интерфейсам хоста
+    # 2) Порты Redis открываются напрямую на хосте, доступны извне
+    # 3) Невозможно использовать Docker DNS и service discovery
+    # 4) Конфликтует с параметром networks (network_mode и networks взаимоисключающие)
+    # 5) Нарушает изоляцию и принцип наименьших привилегий
+    # РЕШЕНИЕ: Удалить network_mode: host, использовать стандартные Docker networks.
+    # Redis будет доступен другим контейнерам по имени сервиса через Docker DNS.
+    networks:
+      - db_internal  # Redis должен быть только во внутренней сети
 
   photo_db:
-    image: mysql:5.7
+    # ИСПРАВЛЕНО: Обновлена версия MySQL с 5.7 на 8.0
+    # ПРОБЛЕМА: MySQL 5.7 достиг End of Life в октябре 2023 года:
+    # 1) Больше не получает обновления безопасности
+    # 2) Содержит известные уязвимости (CVE)
+    # 3) Не поддерживает новые функции безопасности и производительности
+    # РЕШЕНИЕ: Использовать MySQL 8.0 или выше (8.4 - текущая LTS версия).
+    # При миграции проверить совместимость SQL-запросов и аутентификации.
+    image: mysql:8.4
     container_name: photo_db
     restart: always
+    # ИСПРАВЛЕНО: Порт изменен на localhost binding
+    # ПРОБЛЕМА: Порт 3306 открыт на всех интерфейсах (0.0.0.0:3306):
+    # 1) База данных доступна из внешней сети
+    # 2) Злоумышленник может попытаться брутфорс или эксплуатировать уязвимости MySQL
+    # 3) Нарушает принцип defence in depth - БД должна быть доступна только из backend
+    # РЕШЕНИЕ: Либо убрать проброс портов совсем (БД доступна только внутри Docker сети),
+    # либо привязать к localhost (127.0.0.1:3306) для локальной отладки.
+    # Для production окружения проброс портов БД вообще не нужен.
     ports:
-      - 3306:3306
+      - "127.0.0.1:3306:3306"  # Привязка к localhost для отладки
     environment:
-      MYSQL_ROOT_PASSWORD: toor
+      # ИСПРАВЛЕНО: Пароли вынесены в переменные окружения файла .env
+      # ПРОБЛЕМА: Хардкод паролей в docker-compose.yml:
+      # 1) MYSQL_ROOT_PASSWORD: toor - слабый пароль, популярный в словарях (root наоборот)
+      # 2) MYSQL_PASSWORD: password - тривиальный пароль
+      # 3) Пароли хранятся в системе контроля версий (git) - доступны всем с доступом к репо
+      # 4) Невозможно использовать разные пароли для dev/staging/production
+      # 5) Нарушает практики безопасного хранения секретов
+      # РЕШЕНИЕ: Вынести пароли в .env файл (не коммитится в git, добавить в .gitignore).
+      # Использовать сильные пароли (минимум 16 символов, случайные). Для production
+      # использовать Docker secrets или внешние системы управления секретами (Vault, etc).
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: photo_db
       MYSQL_USER: user
-      MYSQL_PASSWORD: password
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
       - "./init.sql:/docker-entrypoint-initdb.d/init.sql"
       - photo-gallery:/var/lib/mysql
@@ -59,6 +112,7 @@ services:
 volumes:
   redis-data:
   photo-gallery:
+  backend-data:  # Добавлен volume для backend
 
 
 networks:
